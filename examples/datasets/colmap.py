@@ -62,11 +62,14 @@ class Parser:
         factor: int = 1,
         normalize: bool = False,
         test_every: int = 8,
+        use_mask: bool = False,
     ):
         self.data_dir = data_dir
         self.factor = factor
         self.normalize = normalize
         self.test_every = test_every
+        # Auto-detect masks_dir from data_dir/masks_images if use_mask=True
+        self.masks_dir = os.path.join(data_dir, "masks_images") if use_mask else None
 
         colmap_dir = os.path.join(data_dir, "sparse/0/")
         if not os.path.exists(colmap_dir):
@@ -259,6 +262,33 @@ class Parser:
         self.point_indices = point_indices  # Dict[str, np.ndarray], image_name -> [M,]
         self.transform = transform  # np.ndarray, (4, 4)
 
+        # Load per-image masks from masks_dir if provided
+        # Masks should be PNG files with same name as images (white=keep, black=ignore)
+        self.image_masks = [None] * len(image_names)  # List[Optional[np.ndarray]], per image
+        if self.masks_dir is not None and os.path.exists(self.masks_dir):
+            print(f"[Parser] Loading masks from {self.masks_dir}")
+            mask_count = 0
+            for i, image_name in enumerate(image_names):
+                # Try different extensions for mask files
+                base_name = os.path.splitext(image_name)[0]
+                for ext in [".png", ".jpg", ".jpeg"]:
+                    mask_path = os.path.join(self.masks_dir, base_name + ext)
+                    if os.path.exists(mask_path):
+                        mask = imageio.imread(mask_path)
+                        # Convert to binary mask (white=True=keep, black=False=ignore)
+                        if len(mask.shape) == 3:
+                            mask = mask[..., 0]  # Take first channel
+                        # Resize mask to match image size if factor > 1
+                        if factor > 1:
+                            mask = np.array(Image.fromarray(mask).resize(
+                                (mask.shape[1] // factor, mask.shape[0] // factor),
+                                Image.NEAREST
+                            ))
+                        self.image_masks[i] = mask > 127  # Binary threshold
+                        mask_count += 1
+                        break
+            print(f"[Parser] Loaded {mask_count}/{len(image_names)} masks")
+
         # load one image to check the size. In the case of tanksandtemples dataset, the
         # intrinsics stored in COLMAP corresponds to 2x upsampled images.
         actual_image = imageio.imread(self.image_paths[0])[..., :3]
@@ -378,7 +408,8 @@ class Dataset:
         K = self.parser.Ks_dict[camera_id].copy()  # undistorted K
         params = self.parser.params_dict[camera_id]
         camtoworlds = self.parser.camtoworlds[index]
-        mask = self.parser.mask_dict[camera_id]
+        camera_mask = self.parser.mask_dict[camera_id]  # fisheye ROI mask
+        image_mask = self.parser.image_masks[index]  # per-image mask for dynamic objects
 
         if len(params) > 0:
             # Images are distorted. Undistort them.
@@ -389,6 +420,10 @@ class Dataset:
             image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
             x, y, w, h = self.parser.roi_undist_dict[camera_id]
             image = image[y : y + h, x : x + w]
+            # Also undistort and crop per-image mask if present
+            if image_mask is not None:
+                image_mask = cv2.remap(image_mask.astype(np.uint8), mapx, mapy, cv2.INTER_NEAREST)
+                image_mask = image_mask[y : y + h, x : x + w].astype(bool)
 
         if self.patch_size is not None:
             # Random crop.
@@ -398,6 +433,18 @@ class Dataset:
             image = image[y : y + self.patch_size, x : x + self.patch_size]
             K[0, 2] -= x
             K[1, 2] -= y
+            # Also crop per-image mask if present
+            if image_mask is not None:
+                image_mask = image_mask[y : y + self.patch_size, x : x + self.patch_size]
+
+        # Combine camera mask (fisheye ROI) and per-image mask (dynamic objects)
+        mask = None
+        if camera_mask is not None and image_mask is not None:
+            mask = np.logical_and(camera_mask, image_mask)
+        elif camera_mask is not None:
+            mask = camera_mask
+        elif image_mask is not None:
+            mask = image_mask
 
         data = {
             "K": torch.from_numpy(K).float(),

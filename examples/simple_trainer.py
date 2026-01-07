@@ -59,6 +59,8 @@ class Config:
     result_dir: str = "results/garden"
     # Every N images there is a test image
     test_every: int = 8
+    # Load masks from data_dir/masks_images (white=keep, black=ignore for dynamic objects)
+    use_mask: bool = False
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
@@ -337,6 +339,7 @@ class Runner:
             factor=cfg.data_factor,
             normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
+            use_mask=cfg.use_mask,
         )
         self.trainset = Dataset(
             self.parser,
