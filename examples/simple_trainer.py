@@ -442,7 +442,25 @@ class Runner:
                 self.app_module = DDP(self.app_module)
 
         self.bil_grid_optimizers = []
-        if cfg.use_bilateral_grid:
+        if cfg.use_bilateral_grid or cfg.use_fused_bilagrid:
+            if cfg.use_fused_bilagrid:
+                cfg.use_bilateral_grid = True
+                from fused_bilagrid import (
+                    BilateralGrid,
+                    color_correct,
+                    slice as bil_slice,
+                    total_variation_loss,
+                )
+            else:
+                from lib_bilagrid import (
+                    BilateralGrid,
+                    color_correct,
+                    slice as bil_slice,
+                    total_variation_loss,
+                )
+            self.bil_slice = bil_slice
+            self.bil_tv_loss = total_variation_loss
+            self.bil_color_correct = color_correct
             self.bil_grids = BilateralGrid(
                 len(self.trainset),
                 grid_X=cfg.bilateral_grid_shape[0],
@@ -664,7 +682,7 @@ class Runner:
                     indexing="ij",
                 )
                 grid_xy = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
-                colors = slice(
+                colors = self.bil_slice(
                     self.bil_grids,
                     grid_xy.expand(colors.shape[0], -1, -1, -1),
                     colors,
@@ -709,7 +727,7 @@ class Runner:
                 depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
                 loss += depthloss * cfg.depth_lambda
             if cfg.use_bilateral_grid:
-                tvloss = 10 * total_variation_loss(self.bil_grids.grids)
+                tvloss = 10 * self.bil_tv_loss(self.bil_grids.grids)
                 loss += tvloss
 
             # regularizations
@@ -960,7 +978,7 @@ class Runner:
                 metrics["ssim"].append(self.ssim(colors_p, pixels_p))
                 metrics["lpips"].append(self.lpips(colors_p, pixels_p))
                 if cfg.use_bilateral_grid:
-                    cc_colors = color_correct(colors, pixels)
+                    cc_colors = self.bil_color_correct(colors, pixels)
                     cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                     metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
                     metrics["cc_ssim"].append(self.ssim(cc_colors_p, pixels_p))
@@ -1227,25 +1245,6 @@ if __name__ == "__main__":
     }
     cfg = tyro.extras.overridable_config_cli(configs)
     cfg.adjust_steps(cfg.steps_scaler)
-
-    # Import BilateralGrid and related functions based on configuration
-    if cfg.use_bilateral_grid or cfg.use_fused_bilagrid:
-        if cfg.use_fused_bilagrid:
-            cfg.use_bilateral_grid = True
-            from fused_bilagrid import (
-                BilateralGrid,
-                color_correct,
-                slice,
-                total_variation_loss,
-            )
-        else:
-            cfg.use_bilateral_grid = True
-            from lib_bilagrid import (
-                BilateralGrid,
-                color_correct,
-                slice,
-                total_variation_loss,
-            )
 
     # try import extra dependencies
     if cfg.compression == "png":
